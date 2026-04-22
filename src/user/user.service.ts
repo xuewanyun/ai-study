@@ -1,155 +1,164 @@
-import {
-  BadRequestException,
-  NotFoundException,
-  Injectable,
-  InternalServerErrorException,
-} from '@nestjs/common';
-import {
-  CreateUserDto,
-  GetUsersQueryDto,
-  ReplaceUserDto,
-  ResetPasswordDto,
-  UpdateUserDto,
-} from './dto/create-user.dto';
-import { UserResponseDto } from './dto/user-response.dto';
+// src/user/user.service.ts
+
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
+import { QueryUserDto } from './dto/query-user.dto';
 
 @Injectable()
 export class UserService {
-  private readonly users: UserResponseDto[] = [
-    { id: 1, username: 'tom', email: 'tom@example.com' },
-    { id: 2, username: 'jack', email: 'jack@example.com' },
-  ];
+  constructor(private readonly prisma: PrismaService) {}
 
-  getUsers(query: GetUsersQueryDto): UserResponseDto[] {
-    let result = this.users;
-    const username = query.username?.trim();
-    const email = query.email?.trim();
+  // ─── 创建用户 ──────────────────────────────────────────
+  async create(dto: CreateUserDto) {
+    const user = await this.prisma.user.create({
+      data: {
+        name: dto.name,
+        email: dto.email,
+        password: dto.password,
+        role: dto.role ?? 'user',
+      },
+    });
+    return { success: true, data: user };
+  }
 
-    if (username) {
-      result = result.filter((item) => item.username.includes(username));
-    }
-
-    if (email) {
-      result = result.filter((item) => item.email.includes(email));
-    }
-
+  // ─── 分页查询用户列表（支持搜索过滤）─────────────────
+  async findAll(query: QueryUserDto) {
+    // URL 传来的参数都是字符串，这里转成数字并设默认值
+    // page 不传则默认第 1 页
     const page = Number(query.page) || 1;
-    const pageSize = Number(query.pageSize) || 10;
-    const start = (page - 1) * pageSize;
-    return result.slice(start, start + pageSize);
-  }
+    // pageSize 不传则默认每页 10 条，最大限制 100 防止一次查太多
+    const pageSize = Math.min(Number(query.pageSize) || 10, 100);
 
-  getUserById(id: number): UserResponseDto {
-    const user = this.users.find((item) => item.id === id);
-    if (!user) {
-      throw new NotFoundException(`user ${id} not found`);
-    }
-    return user;
-  }
+    // skip：跳过前面多少条记录（分页偏移量）
+    // 第 1 页：skip = (1-1) × 10 = 0，从第 1 条开始取
+    // 第 2 页：skip = (2-1) × 10 = 10，从第 11 条开始取
+    // 第 3 页：skip = (3-1) × 10 = 20，从第 21 条开始取
+    const skip = (page - 1) * pageSize;
 
-  createUser(body: CreateUserDto): UserResponseDto {
-    if (!body.username?.trim()) {
-      throw new BadRequestException('username is required');
-    }
-    if (!body.email?.trim()) {
-      throw new BadRequestException('email is required');
-    }
-    if (!body.password?.trim()) {
-      throw new BadRequestException('password is required');
-    }
-    if (!body.email.includes('@')) {
-      throw new BadRequestException('email format is invalid');
-    }
-    if (body.username === 'server_error') {
-      throw new InternalServerErrorException('simulate server error');
+    // 构建动态过滤条件
+    // 使用 Prisma 的 where 对象，只有传了对应参数才加过滤条件
+    const where: any = {};
+
+    // name 搜索：模糊匹配，contains 相当于 SQL 的 LIKE '%xxx%'
+    // mode: 'insensitive' 表示忽略大小写（PostgreSQL 专用配置）
+    if (query.name) {
+      where.name = {
+        contains: query.name,
+        mode: 'insensitive',
+      };
     }
 
-    const createdUser = {
-      id: Date.now(),
-      username: body.username,
-      email: body.email,
-    };
-    this.users.push(createdUser);
-    return createdUser;
-  }
-
-  updateUser(id: number, body: UpdateUserDto): UserResponseDto {
-    const user = this.getUserById(id);
-    const username = body.username?.trim();
-    const email = body.email?.trim();
-
-    if (username) {
-      user.username = username;
-    }
-    if (email) {
-      if (!email.includes('@')) {
-        throw new BadRequestException('email format is invalid');
-      }
-      user.email = email;
+    // role 过滤：精确匹配
+    if (query.role) {
+      where.role = query.role;
     }
 
-    return user;
-  }
+    // 使用 prisma.$transaction 同时执行两个查询，保证在同一事务内
+    // 好处：total 和 list 基于同一时刻的数据，不会因为并发写入导致数据不一致
+    const [total, list] = await this.prisma.$transaction([
+      // 第一个查询：统计满足条件的总记录数（用于前端计算总页数）
+      // count 不受 skip/take 影响，统计的是全部满足 where 条件的数量
+      this.prisma.user.count({ where }),
 
-  replaceUser(id: number, body: ReplaceUserDto): UserResponseDto {
-    const user = this.getUserById(id);
-    const username = body.username?.trim();
-    const email = body.email?.trim();
+      // 第二个查询：查询当前页的数据列表
+      this.prisma.user.findMany({
+        where, // 过滤条件（同上）
+        skip, // 跳过前面的记录
+        take: pageSize, // 取当前页的数据条数
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          createdAt: true,
+          updatedAt: true,
+          // password 字段不返回，保证安全
+        },
+        // 按创建时间降序排列，最新注册的用户在前面
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
 
-    if (!username) {
-      throw new BadRequestException('username is required');
-    }
-    if (!email) {
-      throw new BadRequestException('email is required');
-    }
-    if (!email.includes('@')) {
-      throw new BadRequestException('email format is invalid');
-    }
+    // 计算总页数：向上取整
+    // 例如 total=25，pageSize=10，则 totalPages = Math.ceil(25/10) = 3
+    const totalPages = Math.ceil(total / pageSize);
 
-    user.username = username;
-    user.email = email;
-    return user;
-  }
-
-  removeUser(id: number): { success: boolean; id: number } {
-    const index = this.users.findIndex((item) => item.id === id);
-    if (index === -1) {
-      throw new NotFoundException(`user ${id} not found`);
-    }
-    this.users.splice(index, 1);
-    return { success: true, id };
-  }
-
-  resetPassword(
-    id: number,
-    notifyByEmail: boolean,
-    body: ResetPasswordDto,
-  ): { id: number; passwordUpdated: boolean; notifyByEmail: boolean } {
-    this.getUserById(id);
-    if (!body.newPassword?.trim()) {
-      throw new BadRequestException('newPassword is required');
-    }
-    return { id, passwordUpdated: true, notifyByEmail };
-  }
-
-  getUsersByStatus(status?: 'active' | 'inactive'): UserResponseDto[] {
-    if (!status) {
-      return this.users;
-    }
-    return this.users.filter((item) =>
-      status === 'active' ? item.id % 2 === 1 : item.id % 2 === 0,
-    );
-  }
-
-  getUserPost(
-    id: number,
-    postId: number,
-  ): { userId: number; postId: number; title: string } {
-    this.getUserById(id);
     return {
-      userId: id,
-      postId,
-      title: `mock post ${postId} of user ${id}`,
+      // 分页元信息：前端需要这些数据来渲染分页组件
+      pagination: {
+        page, // 当前页码
+        pageSize, // 每页条数
+        total, // 总记录数
+        totalPages, // 总页数
+        hasNext: page < totalPages, // 是否有下一页
+        hasPrev: page > 1, // 是否有上一页
+      },
+      // 当前页的数据列表
+      list,
     };
+  }
+
+  // ─── 查询单个用户（含文章列表）────────────────────────
+  async findOne(id: number) {
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        createdAt: true,
+        // 联表查询该用户的所有文章
+        posts: {
+          select: {
+            id: true,
+            title: true,
+            published: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+
+    if (!user) {
+      return { success: false, message: `用户 ID ${id} 不存在` };
+    }
+    return { success: true, data: user };
+  }
+
+  // ─── 更新用户 ───────────────────────────────────────────
+  async update(id: number, dto: UpdateUserDto) {
+    const exists = await this.prisma.user.findUnique({ where: { id } });
+    if (!exists) {
+      return { success: false, message: `用户 ID ${id} 不存在` };
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id },
+      data: dto,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        updatedAt: true,
+      },
+    });
+    return { success: true, message: '更新成功', data: updated };
+  }
+
+  // ─── 删除用户 ───────────────────────────────────────────
+  async remove(id: number) {
+    const exists = await this.prisma.user.findUnique({ where: { id } });
+    if (!exists) {
+      return { success: false, message: `用户 ID ${id} 不存在` };
+    }
+
+    // onDelete: Cascade 配置使删除用户时自动级联删除其文章
+    await this.prisma.user.delete({ where: { id } });
+    return { success: true, message: `用户 ID ${id} 已删除` };
   }
 }

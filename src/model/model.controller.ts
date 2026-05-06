@@ -25,4 +25,9 @@ export class ModelController {
   chatStream(@Body() body: { message: string }, @Res() res: Response) {
     return this.modelService.chatStream(body.message, res);
   }
+  // 带解析器的流失聊天模型
+  @Post('chatWithParser')
+  chatWithParser(@Body() body: { message: string }) {
+    return this.modelService.chatWithParser(body.message);
+  }
 }

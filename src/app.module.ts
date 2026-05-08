@@ -5,6 +5,9 @@ import { PostModule } from './post/post.module';
 import { ModelModule } from './model/model.module';
 import { PromptsModule } from './prompts/prompts.module';
 import { ChainsModule } from './chains/chains.module';
+import { AgentsService } from './agents/agents.service';
+import { AgentsController } from './agents/agents.controller';
+import { AgentsModule } from './agents/agents.module';
 
 @Module({
   imports: [
@@ -14,6 +17,9 @@ import { ChainsModule } from './chains/chains.module';
     ModelModule,
     PromptsModule,
     ChainsModule,
+    AgentsModule,
   ],
+  providers: [AgentsService],
+  controllers: [AgentsController],
 })
 export class AppModule {}

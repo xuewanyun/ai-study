@@ -12,4 +12,9 @@ export class ChainsController {
   generateBlog(@Body() body: { keywords: string; style: string }) {
     return this.chainsService.generateBlog(body.keywords, body.style);
   }
+  //  路由分支 根据question判断走哪个链
+  @Post('branch')
+  branch(@Body() body: { question: string }) {
+    return this.chainsService.branch(body.question);
+  }
 }

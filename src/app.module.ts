@@ -8,6 +8,7 @@ import { ChainsModule } from './chains/chains.module';
 import { AgentsService } from './agents/agents.service';
 import { AgentsController } from './agents/agents.controller';
 import { AgentsModule } from './agents/agents.module';
+import { MemoryModule } from './memory/memory.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { AgentsModule } from './agents/agents.module';
     PromptsModule,
     ChainsModule,
     AgentsModule,
+    MemoryModule,
   ],
   providers: [AgentsService],
   controllers: [AgentsController],

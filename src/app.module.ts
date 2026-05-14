@@ -9,6 +9,7 @@ import { AgentsService } from './agents/agents.service';
 import { AgentsController } from './agents/agents.controller';
 import { AgentsModule } from './agents/agents.module';
 import { MemoryModule } from './memory/memory.module';
+import { RagModule } from './rag/rag.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { MemoryModule } from './memory/memory.module';
     ChainsModule,
     AgentsModule,
     MemoryModule,
+    RagModule,
   ],
   providers: [AgentsService],
   controllers: [AgentsController],

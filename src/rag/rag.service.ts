@@ -1,16 +1,21 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ChatOllama, OllamaEmbeddings } from '@langchain/ollama';
-import { MemoryVectorStore } from '@langchain/classic/vectorstores/memory';
+// import { MemoryVectorStore } from '@langchain/classic/vectorstores/memory';
 import { Document } from '@langchain/core/documents';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
+import {
+  DistanceStrategy,
+  PGVectorStore,
+} from '@langchain/community/vectorstores/pgvector';
 import { config } from '../config';
+import { Pool } from 'pg';
 
 // 将向量存到内存
 
 @Injectable()
-export class RagService {
+export class RagService implements OnModuleInit, OnModuleDestroy {
   private llm = new ChatOllama({
     model: config.ollama.chatModel,
     temperature: config.ollama.temperature,
@@ -21,9 +26,44 @@ export class RagService {
     model: config.ollama.embedModel,
     baseUrl: config.ollama.baseUrl,
   });
-  private vectorStore: MemoryVectorStore | null = null;
   private docCount: number = 0;
   private stringParser = new StringOutputParser();
+  // 配置连接器(在模块初始化时建立数据库连接)
+  private pool: Pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 10,
+    // 空闲连接超时时间
+    idleTimeoutMillis: 30000,
+    // 连接超时时间
+    connectionTimeoutMillis: 2000,
+  });
+  // 配置vector
+  private pgVectorConfig = {
+    pool: this.pool,
+    collectionName: 'rag-knowledge-base',
+    collectionTableName: 'langchain_pg_collection',
+    tableName: 'langchain_pg_embedding',
+    columns: {
+      idColumnName: 'id',
+      vectorColumnName: 'embedding',
+      contentColumnName: 'document',
+      metadataColumnName: 'cmetadata',
+    },
+    distanceStrategy: 'cosine' as DistanceStrategy,
+  };
+  private vectorStore: PGVectorStore | null = null;
+  async onModuleInit() {
+    const vectorStore = await PGVectorStore.initialize(
+      this.embeddings,
+      this.pgVectorConfig,
+    );
+    this.vectorStore = vectorStore ?? [];
+    console.log('vectorStore', vectorStore);
+  }
+  async onModuleDestroy() {
+    await this.pool.end();
+    console.log('RagService：PostgreSQL 连接池已关闭');
+  }
   // 加载文档
   async loadDocuments(
     documents: { id: string; content: string; source?: string }[],
@@ -43,11 +83,12 @@ export class RagService {
       allDocs.push(...chucks);
     }
     // 将这些文档向量化 存入向量库
-    this.vectorStore = await MemoryVectorStore.fromDocuments(
+    await PGVectorStore.fromDocuments(
       allDocs,
       this.embeddings,
+      this.pgVectorConfig,
     );
-    this.docCount = allDocs.length;
+    this.docCount += documents.length;
     return {
       success: true,
       originalDocs: documents.length,
@@ -56,53 +97,39 @@ export class RagService {
     };
   }
   async search(question: string, topK: number) {
-    // 先看内存有没得
-    if (!this.vectorStore) {
-      return {
-        success: false,
-        message: '请先加载文档',
-      };
-    }
     // 使用向量搜索 similaritySearchWithScore
-    const results = await this.vectorStore.similaritySearchWithScore(
+    const results = await this.vectorStore?.similaritySearchWithScore(
       question,
       topK,
     );
     console.info('results', results);
     return {
       question,
-      results: results.map(([doc, score]) => ({
+      results: results?.map(([doc, score]) => ({
         content: doc.pageContent,
         source: doc.metadata.source,
-        score: parseFloat(score.toFixed(4)), // 越高越相关（0~1）
+        similarity: parseFloat((1 - score).toFixed(4)),
+        rawDistance: parseFloat(score.toFixed(4)),
       })),
     };
   }
   async query(question: string, topK: number) {
-    // 先看内存有没得
-    if (!this.vectorStore) {
-      return {
-        success: false,
-        message: '请先加载文档',
-      };
-    }
     // Step 1：检索相关文档块
-    const results = await this.vectorStore.similaritySearchWithScore(
+    const retrieved = await this.vectorStore?.similaritySearchWithScore(
       question,
       topK,
     );
-    console.info('results', results);
-    // 如果没有 返回 无相关文档
-    if (results.length === 0) {
-      return {
-        success: false,
-        message: '无相关文档',
-      };
+    console.info('results', retrieved);
+    const filtered = retrieved?.filter(([, score]) => score <= 0.5);
+
+    if (!filtered?.length) {
+      return { question, answer: '知识库中没有找到相关内容', sources: [] };
     }
+
     // Step 2：把检索结果拼成 context 字符串
     // [1] 第一块内容\n\n[2] 第二块内容...
     // 编号方便模型在回答时引用："根据[1]..."
-    const context = results
+    const context = filtered
       .map(([doc], i) => `[${i + 1}] ${doc.pageContent}`)
       .join('\n\n');
     console.info('context', context);
@@ -127,8 +154,13 @@ export class RagService {
     const answer = await chain.invoke({ context, question });
     console.info('answer', answer);
     return {
-      success: true,
+      question,
       answer,
+      sources: filtered.map(([doc, score]) => ({
+        content: doc.pageContent,
+        source: doc.metadata.source,
+        similarity: parseFloat((1 - score).toFixed(4)),
+      })),
     };
   }
 }
